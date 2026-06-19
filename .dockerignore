@@ -1,0 +1,25 @@
+# Virtualenvs (host venv is Windows — must never leak into the Linux image)
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local data & secrets (never bake these into the image)
+*.db
+*.db-wal
+*.db-shm
+.env
+config.toml
+
+# Repo / docs / deploy artifacts not needed in the image
+.git/
+.gitignore
+backup/
+deploy/
+*.md
+.python-version
+Dockerfile
+docker-compose.yml
+.dockerignore

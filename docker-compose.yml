@@ -1,0 +1,21 @@
+services:
+  bcdm:
+    build: .
+    image: belldevicemonitor:latest
+    container_name: bcdm
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                 # BCDM_* values (copy from .env.example)
+    environment:
+      BCDM_DB_PATH: /data/bcdm.db
+    volumes:
+      - bcdm-data:/data
+      # Alternative to env vars — mount your existing config instead
+      # (and remove the env_file above):
+      # - ./config.toml:/app/config.toml:ro
+
+volumes:
+  bcdm-data:

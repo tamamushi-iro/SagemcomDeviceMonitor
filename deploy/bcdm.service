@@ -1,0 +1,23 @@
+# systemd unit for BellDeviceMonitor on the Raspberry Pi.
+#
+# 1. Edit User= and the two paths below to match your Pi (default assumes the
+#    repo lives at /home/pi/BellDeviceMonitor and uv is at ~/.local/bin/uv).
+# 2. sudo cp deploy/bcdm.service /etc/systemd/system/bcdm.service
+# 3. sudo systemctl daemon-reload && sudo systemctl enable --now bcdm
+# 4. systemctl status bcdm   /   journalctl -u bcdm -f
+
+[Unit]
+Description=BellDeviceMonitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/BellDeviceMonitor
+ExecStart=/home/pi/.local/bin/uv run uvicorn bcdm.web.app:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

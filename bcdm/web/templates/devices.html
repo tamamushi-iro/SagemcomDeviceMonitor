@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<section id="devices-root">
+  <div class="toolbar">
+    <h2 class="section" style="margin:0">Known devices</h2>
+    <input type="search" id="device-filter" placeholder="filter by name, IP or MAC…">
+  </div>
+  <div class="card scrollx">
+    <table class="grid" id="devices-table">
+      <thead>
+        <tr>
+          <th>Log</th><th title="online/offline"></th><th>Name</th><th>IP</th><th>MAC</th><th>Interface</th>
+          <th title="First seen">First</th><th title="Last seen">Last</th><th title="Alert on online/offline">Watch</th><th>Hide</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p class="empty" id="devices-empty" hidden>No devices recorded yet.</p>
+  </div>
+</section>
+{% endblock %}

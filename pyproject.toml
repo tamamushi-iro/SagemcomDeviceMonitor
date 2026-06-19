@@ -1,0 +1,20 @@
+[project]
+name = "belldevicemonitor"
+version = "0.1.0"
+description = "Always-on monitor + dashboard for devices connected to a Bell (Sagemcom F@st) router."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "sagemcom-api==1.4.3",
+    "python-dateutil>=2.9",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+    "httpx>=0.27",
+    "pydantic-settings==2.14.2",
+]
+
+[tool.uv]
+# Application, not a library: manage the env + deps but don't build/install bcdm itself.
+package = false
+link-mode = "copy"

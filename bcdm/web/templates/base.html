@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BellDeviceMonitor</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script>
+    // Apply saved/system theme before paint to avoid a flash.
+    (function () {
+      try {
+        var t = localStorage.getItem('bcdm-theme');
+        if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+</head>
+<body data-poll-interval="{{ poll_interval }}">
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">BellDeviceMonitor</div>
+      <nav>
+        <a href="/" class="{{ 'on' if active == 'now' else '' }}">Now</a>
+        <a href="/history" class="{{ 'on' if active == 'history' else '' }}">History</a>
+        <a href="/devices" class="{{ 'on' if active == 'devices' else '' }}">Devices</a>
+      </nav>
+      <div class="side-foot">
+        <div class="status">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-text">connecting…</span>
+        </div>
+        <button class="theme-toggle" id="theme-toggle" type="button">
+          <span id="theme-label">Dark mode</span>
+        </button>
+      </div>
+    </aside>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+  <script src="/static/chart.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

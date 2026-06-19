@@ -1,0 +1,36 @@
+# BellDeviceMonitor configuration.
+# Copy this file to `config.toml` and fill in your values.
+# Any key can also be set via a BCDM_-prefixed env var, e.g. BCDM_ROUTER_PASSWORD=secret.
+# config.toml is gitignored.
+
+# --- Router (Bell / Sagemcom F@st gateway) ---
+router_host = "192.168.x.x"
+router_user = ""
+router_password = ""           # REQUIRED: your router admin password
+encryption = "SHA512"          # "SHA512" (Home Hub) or "MD5"
+verify_ssl = true
+
+# --- Poller ---
+poll_interval_seconds = 30      # how often to query the router
+retention_days = 1024            # keep count history this long (older rows pruned)
+
+# --- Dashboard login (HTTP Basic) ---
+auth_user = "admin"
+auth_password = "admin"         # CHANGE THIS
+
+# --- ntfy alerts (https://ntfy.sh or self-hosted) ---
+ntfy_server = "https://ntfy.sh"
+ntfy_topic = "ntfy-alerts"      # pick a hard-to-guess topic; subscribe to it in the ntfy app
+ntfy_token = ""                 # optional access token for protected topics
+alert_new_device = true         # alert when an unknown device joins
+
+# --- Dev-only Windows route helper (leave false on the Pi) ---
+# Only for a dev box that reaches 192.168.x.x via a second router AND runs a
+# full-tunnel VPN. Requires running as Administrator on Windows.
+manage_dev_route = false
+dev_route_dest = "192.168.x.x"
+dev_route_mask = "255.255.255.0"
+dev_route_gw = "192.168.x.x"
+
+# --- Storage ---
+db_path = "bcdm.db"             # relative paths resolve from the project root
