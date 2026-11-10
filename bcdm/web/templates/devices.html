@@ -1,21 +1,78 @@
 {% extends "base.html" %}
+{% block title %}Devices · BellDeviceMonitor{% endblock %}
 {% block content %}
-<section id="devices-root">
-  <div class="toolbar">
-    <h2 class="section" style="margin:0">Known devices</h2>
-    <input type="search" id="device-filter" placeholder="filter by name, IP or MAC…">
+<section id="devices-root" class="loading">
+  <header class="page-head">
+    <h1>Devices</h1>
+    <p class="page-sub" id="dv-summary"></p>
+  </header>
+
+  <div class="notice info" id="dv-suggest" hidden></div>
+
+  <div class="filters">
+    <div class="seg" id="dv-show" role="group" aria-label="Which devices">
+      <button type="button" data-value="seen">Seen online</button>
+      <button type="button" data-value="online">Online now</button>
+      <button type="button" data-value="new">New</button>
+      <button type="button" data-value="unowned">No owner</button>
+      <button type="button" data-value="hidden">Hidden</button>
+      <button type="button" data-value="all">Everything</button>
+    </div>
+    <input type="search" id="dv-filter" placeholder="Filter by name, owner, IP or MAC" aria-label="Filter devices">
+    <span class="spacer"></span>
+    <label>History
+      <span class="seg" id="dv-days" role="group" aria-label="History length">
+        <button type="button" data-value="30">30 days</button>
+        <button type="button" data-value="90">90 days</button>
+        <button type="button" data-value="0">All</button>
+      </span>
+    </label>
   </div>
-  <div class="card scrollx">
-    <table class="grid" id="devices-table">
-      <thead>
-        <tr>
-          <th>Log</th><th title="online/offline"></th><th>Name</th><th>IP</th><th>MAC</th><th>Interface</th>
-          <th title="First seen">First</th><th title="Last seen">Last</th><th title="Alert on online/offline">Watch</th><th>Hide</th>
-        </tr>
-      </thead>
-      <tbody></tbody>
-    </table>
-    <p class="empty" id="devices-empty" hidden>No devices recorded yet.</p>
+
+  <div class="card" id="dv-matrix">
+    <div class="card-head">
+      <div class="titles">
+        <h2>When each device was here</h2>
+        <p class="sub" id="dv-matrix-sub"></p>
+      </div>
+      <div class="legend" aria-hidden="true">
+        <span class="scale">0 h<i class="ramp"></i>24 h a day</span>
+        <span class="key"><i class="sw gap"></i>Not monitored</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="chart" id="dv-matrix-chart" style="height:300px" role="img" aria-label="Hours at home per device per day"></div>
+      <p class="empty" id="dv-matrix-empty" hidden>None of these devices was online in this period.</p>
+    </div>
   </div>
+
+  <div class="card">
+    <div class="card-head">
+      <div class="titles">
+        <h2>All devices</h2>
+        <p class="sub">Name a device or give it an owner by typing in its row. A person counts as home while something they carry is connected.</p>
+      </div>
+    </div>
+    <div class="card-body flush scrollx">
+      <table class="grid" id="dv-table">
+        <thead>
+          <tr>
+            <th></th><th>Device</th><th>Owner</th>
+            <th class="ctr" title="Goes where its owner goes, so it counts toward whether they are home. A laptop that stays on a desk should not be ticked.">Carried</th>
+            <th>Pattern</th><th>Last seen</th><th>First seen</th>
+            <th class="ctr" title="Send an alert when it comes online or goes offline">Watch</th>
+            <th class="ctr" title="Leave it out of the Overview">Hide</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="dv-empty" hidden>No devices match.</p>
+    </div>
+  </div>
+  <datalist id="dv-owners"></datalist>
 </section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/echarts/echarts.min.js"></script>
+<script type="module" src="/static/js/devices.js"></script>
 {% endblock %}

@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% block title %}Patterns · BellDeviceMonitor{% endblock %}
+{% block content %}
+<section id="patterns-root" class="loading">
+  <header class="page-head">
+    <h1>Patterns</h1>
+    <p class="page-sub">When someone, or the whole household, is usually here.</p>
+  </header>
+
+  <div class="filters">
+    <label>Show <select id="pt-subject" aria-label="Who or what to show"></select></label>
+    <span class="page-sub" id="pt-members"></span>
+  </div>
+
+  <div class="tiles" id="pt-tiles"></div>
+
+  <div class="card" id="pt-cal">
+    <div class="card-head">
+      <div class="titles">
+        <h2 id="pt-cal-title">Every day</h2>
+        <p class="sub" id="pt-cal-sub"></p>
+      </div>
+      <div class="legend" id="pt-cal-legend" aria-hidden="true"></div>
+    </div>
+    <div class="card-body">
+      <div class="chart" id="pt-cal-chart" style="height:170px" role="img" aria-label="Calendar of daily totals"></div>
+    </div>
+  </div>
+
+  <div class="filters">
+    <span class="page-sub">Detail for the last</span>
+    <div class="seg" id="pt-weeks" role="group" aria-label="Period">
+      <button type="button" data-value="4">4 weeks</button>
+      <button type="button" data-value="8">8 weeks</button>
+      <button type="button" data-value="12">12 weeks</button>
+      <button type="button" data-value="0">All</button>
+    </div>
+    <span class="page-sub" id="pt-period"></span>
+  </div>
+
+  <div class="card" id="pt-week">
+    <div class="card-head">
+      <div class="titles">
+        <h2>Typical week</h2>
+        <p class="sub" id="pt-week-sub"></p>
+      </div>
+      <div class="legend" id="pt-week-legend" aria-hidden="true"></div>
+    </div>
+    <div class="card-body">
+      <div class="chart" id="pt-week-chart" style="height:236px" role="img" aria-label="Typical week by weekday and hour"></div>
+    </div>
+  </div>
+
+  <div class="card" id="pt-days">
+    <div class="card-head">
+      <div class="titles">
+        <h2>Day by day</h2>
+        <p class="sub" id="pt-days-sub"></p>
+      </div>
+      <div class="legend" id="pt-days-legend" aria-hidden="true"></div>
+    </div>
+    <div class="card-body">
+      <div class="chart" id="pt-days-chart" style="height:400px" role="img" aria-label="One row per day"></div>
+    </div>
+  </div>
+
+  <div class="card" id="pt-trend" hidden>
+    <div class="card-head">
+      <div class="titles">
+        <h2>Over time</h2>
+        <p class="sub">One point per day. The table under "Day by day" has the same numbers.</p>
+      </div>
+      <div class="legend" aria-hidden="true">
+        <span class="key"><i class="sw line"></i>Daily average</span>
+        <span class="key"><i class="sw wash"></i>Lowest to highest that day</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="chart" id="pt-trend-chart" style="height:230px" role="img" aria-label="Daily average with each day's range"></div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/echarts/echarts.min.js"></script>
+<script type="module" src="/static/js/patterns.js"></script>
+{% endblock %}

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>BellDeviceMonitor</title>
+  <title>{% block title %}BellDeviceMonitor{% endblock %}</title>
   <link rel="stylesheet" href="/static/styles.css">
   <script>
     // Apply saved/system theme before paint to avoid a flash.
@@ -16,14 +16,15 @@
     })();
   </script>
 </head>
-<body data-poll-interval="{{ poll_interval }}">
+<body data-poll-interval="{{ poll_interval }}" data-host="{{ host }}">
   <div class="layout">
     <aside class="sidebar">
       <div class="brand">BellDeviceMonitor</div>
       <nav>
-        <a href="/" class="{{ 'on' if active == 'now' else '' }}">Now</a>
-        <a href="/history" class="{{ 'on' if active == 'history' else '' }}">History</a>
+        <a href="/" class="{{ 'on' if active == 'overview' else '' }}">Overview</a>
+        <a href="/patterns" class="{{ 'on' if active == 'patterns' else '' }}">Patterns</a>
         <a href="/devices" class="{{ 'on' if active == 'devices' else '' }}">Devices</a>
+        <a href="/health" class="{{ 'on' if active == 'health' else '' }}">Health</a>
       </nav>
       <div class="side-foot">
         <div class="status">
@@ -40,7 +41,6 @@
       {% block content %}{% endblock %}
     </main>
   </div>
-  <script src="/static/chart.min.js"></script>
-  <script src="/static/app.js"></script>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

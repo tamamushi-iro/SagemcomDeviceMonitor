@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block content %}
+<section id="overview-root" class="loading">
+  <header class="page-head">
+    <h1>Overview</h1>
+    <p class="page-sub" id="ov-asof"></p>
+  </header>
+
+  <div class="notice warn" id="ov-stale" role="status" hidden></div>
+  <div class="notice info" id="ov-owners" hidden></div>
+
+  <div class="tiles" id="ov-tiles">
+    <div class="tile hero">
+      <span class="t-label" id="t-connected-label">Connected now</span>
+      <span class="t-value" id="t-connected">–</span>
+      <span class="t-sub" id="t-connected-sub">&nbsp;</span>
+    </div>
+    <a class="tile" href="/patterns?subject=people" id="tile-people">
+      <span class="t-label">People home</span>
+      <span class="t-value" id="t-people">–</span>
+      <span class="t-sub" id="t-people-sub">&nbsp;</span>
+    </a>
+    <a class="tile" href="/devices?show=new">
+      <span class="t-label">New devices, last 7 days</span>
+      <span class="t-value" id="t-new">–</span>
+      <span class="t-sub" id="t-new-sub">&nbsp;</span>
+    </a>
+    <a class="tile" href="/health">
+      <span class="t-label">Always-on gear online</span>
+      <span class="t-value" id="t-always">–</span>
+      <span class="t-sub" id="t-always-sub">&nbsp;</span>
+    </a>
+  </div>
+
+  <div class="card" id="ov-home">
+    <div class="card-head">
+      <div class="titles">
+        <h2>Who is home</h2>
+        <p class="sub">The last 48 hours. A device that reconnects within 90 minutes is treated as having stayed.</p>
+      </div>
+      <div class="legend" aria-hidden="true">
+        <span class="key"><i class="sw on"></i>Connected</span>
+        <span class="key"><i class="sw home"></i>Brief gap</span>
+        <span class="key"><i class="sw off"></i>Not here</span>
+        <span class="key"><i class="sw gap"></i>Not monitored</span>
+      </div>
+    </div>
+    <div class="card-body flush">
+      <div class="rows" id="ov-rows"></div>
+      <p class="empty" id="ov-rows-empty" hidden>Nothing has come or gone in the last 48 hours.</p>
+    </div>
+  </div>
+
+  <div class="card" id="ov-count">
+    <div class="card-head">
+      <div class="titles">
+        <h2>Connected devices, last 48 hours</h2>
+        <p class="sub">Against the usual range for the same weekday and hour over the previous 8 weeks.</p>
+      </div>
+      <div class="legend" aria-hidden="true">
+        <span class="key"><i class="sw line"></i>Connected</span>
+        <span class="key"><i class="sw band"></i>Usual range</span>
+        <span class="key"><i class="sw gap"></i>Not monitored</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <div class="chart" id="ov-count-chart" style="height:220px" role="img" aria-label="Connected devices over the last 48 hours against the usual range"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card" id="ov-connected">
+      <div class="card-head">
+        <div class="titles">
+          <h2>Connected right now</h2>
+          <p class="sub" id="ov-connected-sub">Most recent arrival first.</p>
+        </div>
+        <label class="page-sub"><input type="checkbox" id="ov-hidden"> show hidden</label>
+      </div>
+      <div class="card-body flush scrollx">
+        <table class="grid" id="ov-table">
+          <thead><tr><th>Device</th><th>Owner</th><th>Address</th><th>Link</th><th class="num" title="Brief drops under 90 minutes do not restart the clock">Here for</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <p class="empty" id="ov-table-empty" hidden>No devices are connected.</p>
+      </div>
+    </div>
+
+    <div class="card" id="ov-activity">
+      <div class="card-head">
+        <div class="titles">
+          <h2>Arrivals and departures</h2>
+          <p class="sub">Visits under 10 minutes and always-on gear are left out.</p>
+        </div>
+      </div>
+      <div class="card-body flush">
+        <ul class="feed" id="ov-feed"></ul>
+        <p class="empty" id="ov-feed-empty" hidden>Nobody came or went in the last 48 hours.</p>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+{% block scripts %}
+<script src="/static/vendor/echarts/echarts.min.js"></script>
+<script type="module" src="/static/js/overview.js"></script>
+{% endblock %}

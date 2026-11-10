@@ -3,7 +3,9 @@
 One long-lived connection in WAL mode, serialized by a lock. Public methods are
 async and run the synchronous SQLite work in a worker thread so the event loop
 is never blocked. The hot path is :meth:`Database.apply_poll`, which diffs a poll
-against stored state in a single transaction.
+against stored state in a single transaction. The dashboard reads through
+:meth:`Database.insight`, which hands a consistent snapshot of the history to one
+of the payload builders in :mod:`bcdm.insights`.
 """
 
 from __future__ import annotations
@@ -12,11 +14,14 @@ import asyncio
 import sqlite3
 import threading
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
-from .util import TS_FORMAT, parse_ts, since_str, to_iso_z, utc_now, utc_now_str, x_time_ago
+from .analytics import BUCKET_S, SAMPLE_GAP_S
+from .insights import Model, State, build_model
+from .util import TS_FORMAT, iso_to_epoch, since_str, to_iso_z, utc_now_str, x_time_ago
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -29,7 +34,9 @@ CREATE TABLE IF NOT EXISTS devices (
     last_seen      TEXT NOT NULL,
     is_active      INTEGER NOT NULL DEFAULT 0,
     watched        INTEGER NOT NULL DEFAULT 0,
-    hidden         INTEGER NOT NULL DEFAULT 0
+    hidden         INTEGER NOT NULL DEFAULT 0,
+    owner          TEXT,
+    carried        INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS count_samples (
@@ -55,67 +62,59 @@ CREATE TABLE IF NOT EXISTS interface_samples (
 CREATE INDEX IF NOT EXISTS idx_interface_samples_ts ON interface_samples(ts);
 """
 
-# range key -> (timedelta kwargs for the lookback window, strftime bucket or None for raw)
-_HISTORY_RANGES: dict[str, tuple[dict[str, float], str | None]] = {
-    "1h": ({"hours": 1}, None),
-    "24h": ({"hours": 24}, "%Y-%m-%d %H:%M"),
-    "30d": ({"days": 30}, "%Y-%m-%d %H"),
-    "1y": ({"days": 365}, "%Y-%m-%d"),
-}
+# Columns added after the first release: (table, column, declaration).
+# owner:   the person a device belongs to.
+# carried: whether it goes where its owner goes (1/0), or NULL to judge by its hostname.
+_ADDED_COLUMNS = (("devices", "owner", "TEXT"), ("devices", "carried", "INTEGER"))
+
+_EPOCH = "CAST(strftime('%s', {}) AS INTEGER)"
+_EDITABLE = ("label", "owner", "watched", "hidden", "carried")
+OWNER_MAX_LEN = 40
 
 
-def _intervals_from_events(
-    events: list[sqlite3.Row], start: str, end: str, is_active_now: bool
-) -> list[tuple[str, str]]:
-    """Reconstruct online intervals within [start, end] from presence events.
-
-    Determines the state at `start` from the last event before it; failing that,
-    infers it from the first in-range event; failing that (no events at all, e.g.
-    a baseline-seeded device), assumes the steady current state. This makes a
-    device that's been online since first boot show as online for the whole range.
-    """
-    transitions = [(e["ts"], e["event"] in ("online", "new")) for e in events]
-    before = [t for t in transitions if t[0] < start]
-    in_range = [t for t in transitions if start <= t[0] <= end]
-    if before:
-        online = before[-1][1]
-    elif in_range:
-        online = not in_range[0][1]
-    else:
-        online = is_active_now
-
-    intervals: list[tuple[str, str]] = []
-    seg_start = start if online else None
-    for ts, to_online in in_range:
-        if to_online and not online:
-            online, seg_start = True, ts
-        elif not to_online and online:
-            online = False
-            intervals.append((seg_start, ts))  # type: ignore[arg-type]
-            seg_start = None
-    if online and seg_start is not None:
-        intervals.append((seg_start, end))
-    return [(s, e) for s, e in intervals if s < e]  # drop zero-width spans
-
-
-def _overlap_seconds(s: datetime, e: datetime, a: datetime, b: datetime) -> float:
-    """Seconds that interval [s, e] overlaps window [a, b]."""
-    lo, hi = max(s, a), min(e, b)
-    return max(0.0, (hi - lo).total_seconds())
+def clean_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the editable device fields, normalized for storage."""
+    out: dict[str, Any] = {}
+    for key in _EDITABLE:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key in ("watched", "hidden"):
+            if value is not None:
+                out[key] = int(bool(value))
+        elif key == "carried":
+            out[key] = None if value is None else int(bool(value))
+        else:
+            text = (value or "").strip()
+            out[key] = (text[:OWNER_MAX_LEN] if key == "owner" else text) or None
+    return out
 
 
 class Database:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, sample_gap_s: int = SAMPLE_GAP_S):
         self._path = str(path)
+        self._sample_gap = int(sample_gap_s)
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # Derived from the history and kept up to date incrementally (see _state).
+        self._cover: list[list[int]] | None = None
+        self._cover_last: str | None = None
+        self._rollup: dict[int, tuple[int, int, int, int]] | None = None
+        self._rollup_last = 0
+        self._events: dict[str, list[tuple[int, bool]]] | None = None
+        self._events_ver = 0
+        self._memo: dict[Any, Any] = {}
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.executescript(SCHEMA)
+            for table, column, decl in _ADDED_COLUMNS:
+                have = {r["name"] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+                if column not in have:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
             self._conn.commit()
 
     # -- async wrappers ------------------------------------------------------
@@ -125,11 +124,11 @@ class Database:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         return await self._run(self._apply_poll, hosts, new_device_window_min)
 
-    async def get_count_history(self, range_key: str) -> list[dict[str, Any]]:
-        return await self._run(self._get_count_history, range_key)
-
-    async def list_devices(self) -> list[dict[str, Any]]:
-        return await self._run(self._list_devices)
+    async def insight(
+        self, build: Callable[..., dict[str, Any]], tz: ZoneInfo, now: int, *args: Any
+    ) -> dict[str, Any]:
+        """Run a payload builder from :mod:`bcdm.insights` on the current history."""
+        return await self._run(self._insight, build, tz, now, args)
 
     async def get_device(self, mac: str) -> dict[str, Any] | None:
         return await self._run(self._get_device, mac)
@@ -137,27 +136,12 @@ class Database:
     async def get_device_events(self, mac: str, limit: int = 100) -> list[dict[str, Any]]:
         return await self._run(self._get_device_events, mac, limit)
 
-    async def get_recent_events(self, limit: int = 25) -> list[dict[str, Any]]:
-        return await self._run(self._get_recent_events, limit)
-
-    async def get_presence_timeline(
-        self, range_key: str, scope: str = "watched", limit: int = 40
-    ) -> dict[str, Any]:
-        return await self._run(self._get_presence_timeline, range_key, scope, limit)
-
-    async def get_presence_heatmap(
-        self, days: int, scope: str = "all", limit: int = 40
-    ) -> dict[str, Any]:
-        return await self._run(self._get_presence_heatmap, days, scope, limit)
-
-    async def get_daily_activity(self, days: int) -> dict[str, Any]:
-        return await self._run(self._get_daily_activity, days)
-
-    async def get_interface_history(self, range_key: str) -> dict[str, Any]:
-        return await self._run(self._get_interface_history, range_key)
-
     async def update_device(self, mac: str, **fields: Any) -> dict[str, Any] | None:
         return await self._run(self._update_device, mac, fields)
+
+    async def update_devices(self, macs: list[str], **fields: Any) -> int:
+        """Apply the same edit to several MAC addresses; returns how many changed."""
+        return await self._run(self._update_devices, macs, fields)
 
     async def prune(self, retention_days: int) -> int:
         return await self._run(self._prune, retention_days)
@@ -284,6 +268,7 @@ class Database:
                     "ip": h["ip"],
                     "interface_type": h["interface_type"],
                     "active_last_change": h.get("active_last_change"),
+                    "active_last_change_ts": iso_to_epoch(h.get("active_last_change")),
                     "active_since": x_time_ago(h.get("active_last_change")),
                     "first_seen": to_iso_z(r["first_seen"]) if r else None,
                     "last_seen": to_iso_z(r["last_seen"]) if r else None,
@@ -295,29 +280,110 @@ class Database:
         out.sort(key=lambda d: d["active_last_change"] or "", reverse=True)
         return out
 
-    def _get_count_history(self, range_key: str) -> list[dict[str, Any]]:
-        delta, bucket = _HISTORY_RANGES.get(range_key, _HISTORY_RANGES["24h"])
-        since = since_str(**delta)
-        if bucket is None:
-            rows = self._conn.execute(
-                "SELECT ts, active_count AS active, total_count AS total"
-                " FROM count_samples WHERE ts >= ? ORDER BY ts",
-                (since,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT MIN(ts) AS ts, ROUND(AVG(active_count), 1) AS active,"
-                " ROUND(AVG(total_count), 1) AS total FROM count_samples"
-                " WHERE ts >= ? GROUP BY strftime(?, ts) ORDER BY ts",
-                (since, bucket),
-            ).fetchall()
-        return [{"ts": to_iso_z(r["ts"]), "active": r["active"], "total": r["total"]} for r in rows]
+    # -- history snapshot for the dashboard ----------------------------------
 
-    def _list_devices(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT * FROM devices ORDER BY is_active DESC, last_seen DESC"
-        ).fetchall()
-        return [self._device_dict(r) for r in rows]
+    def _insight(
+        self, build: Callable[..., dict[str, Any]], tz: ZoneInfo, now: int, args: tuple[Any, ...]
+    ) -> dict[str, Any]:
+        model: Model = build_model(self._state(now), tz)
+        return build(model, *args)
+
+    def _state(self, now: int) -> State:
+        return State(
+            now=now,
+            sample_gap=self._sample_gap,
+            cover=self._coverage(),
+            devices=self._device_rows(),
+            events=self._presence_events(),
+            rollup=self._counts(),
+            version=self._events_ver,
+            memo=self._memo,
+        )
+
+    def _coverage(self) -> list[tuple[int, int]]:
+        """Spans in which polls kept succeeding (no gap longer than the sample gap).
+
+        Built once from every sample, then extended with the samples that arrived
+        since the previous call.
+        """
+        gap = self._sample_gap
+        if self._cover is None:
+            spans: list[list[int]] = []
+            inner = (
+                f"SELECT {_EPOCH.format('ts')} AS t,"
+                f" {_EPOCH.format('LAG(ts) OVER (ORDER BY ts)')} AS prev FROM count_samples"
+            )
+            for t, prev in self._conn.execute(
+                f"SELECT t, prev FROM ({inner}) WHERE prev IS NULL OR t - prev > ? ORDER BY t", (gap,)
+            ):
+                if spans:
+                    spans[-1][1] = prev
+                spans.append([t, t])
+            last_ts, last = self._conn.execute(
+                f"SELECT MAX(ts), {_EPOCH.format('MAX(ts)')} FROM count_samples"
+            ).fetchone()
+            if spans:
+                spans[-1][1] = last
+            self._cover, self._cover_last = spans, last_ts
+        else:
+            spans = self._cover
+            sql = f"SELECT ts, {_EPOCH.format('ts')} FROM count_samples"
+            args: tuple[Any, ...] = ()
+            if self._cover_last:
+                sql, args = sql + " WHERE ts > ?", (self._cover_last,)
+            for ts, t in self._conn.execute(sql + " ORDER BY ts", args):
+                if not spans or t - spans[-1][1] > gap:
+                    spans.append([t, t])
+                else:
+                    spans[-1][1] = t
+                self._cover_last = ts
+        return [(s, e) for s, e in spans if e > s]
+
+    def _counts(self) -> dict[int, tuple[int, int, int, int]]:
+        """Connected-device count per 15 minutes: (samples, sum, min, max)."""
+        sql = (
+            f"SELECT {_EPOCH.format('ts')} / {BUCKET_S} AS b, COUNT(*), SUM(active_count),"
+            " MIN(active_count), MAX(active_count) FROM count_samples{} GROUP BY b"
+        )
+        if self._rollup is None:
+            self._rollup = {}
+            rows = self._conn.execute(sql.format(""))
+        else:
+            # Re-read from the newest bucket on: it may have gained samples.
+            since = datetime.fromtimestamp(self._rollup_last * BUCKET_S, timezone.utc)
+            rows = self._conn.execute(sql.format(" WHERE ts >= ?"), (since.strftime(TS_FORMAT),))
+        for b, n, total, lo, hi in rows:
+            self._rollup[b] = (n, total, lo, hi)
+            if b > self._rollup_last:
+                self._rollup_last = b
+        return self._rollup
+
+    def _presence_events(self) -> dict[str, list[tuple[int, bool]]]:
+        """Every online/offline transition per MAC, appended to as events arrive."""
+        ver = self._conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM presence_events").fetchone()[0]
+        if self._events is None or ver < self._events_ver:
+            self._events, self._events_ver = {}, 0
+        if ver != self._events_ver:
+            for t, mac, event in self._conn.execute(
+                f"SELECT {_EPOCH.format('ts')}, mac, event FROM presence_events"
+                " WHERE rowid > ? ORDER BY ts, rowid",
+                (self._events_ver,),
+            ):
+                self._events.setdefault(mac, []).append((t, event in ("online", "new")))
+            self._events_ver = ver
+        return self._events
+
+    def _device_rows(self) -> list[dict[str, Any]]:
+        return [
+            dict(r)
+            for r in self._conn.execute(
+                "SELECT mac, name, label, owner, carried, last_ip, interface_type, is_active, watched, hidden,"
+                f" {_EPOCH.format('first_seen')} AS first_seen, {_EPOCH.format('last_seen')} AS last_seen"
+                " FROM devices"
+            )
+        ]
+
+    # -- single devices --------------------------------------------------------
 
     def _get_device(self, mac: str) -> dict[str, Any] | None:
         r = self._conn.execute("SELECT * FROM devices WHERE mac = ?", (mac,)).fetchone()
@@ -330,176 +396,21 @@ class Database:
         ).fetchall()
         return [{"ts": to_iso_z(r["ts"]), "event": r["event"]} for r in rows]
 
-    def _get_recent_events(self, limit: int) -> list[dict[str, Any]]:
-        rows = self._conn.execute(
-            "SELECT e.ts AS ts, e.event AS event, e.mac AS mac,"
-            " COALESCE(d.label, d.name, e.mac) AS name"
-            " FROM presence_events e LEFT JOIN devices d ON d.mac = e.mac"
-            " ORDER BY e.ts DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            {"ts": to_iso_z(r["ts"]), "event": r["event"], "mac": r["mac"], "name": r["name"]}
-            for r in rows
-        ]
-
-    def _scope_devices(self, scope: str, limit: int) -> list[sqlite3.Row]:
-        if scope == "watched":
-            rows = self._conn.execute(
-                "SELECT * FROM devices WHERE watched = 1 ORDER BY last_seen DESC"
-            ).fetchall()
-        elif scope == "active":
-            rows = self._conn.execute(
-                "SELECT * FROM devices WHERE is_active = 1 ORDER BY last_seen DESC"
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM devices ORDER BY is_active DESC, last_seen DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return rows[:limit]
-
-    def _get_presence_timeline(
-        self, range_key: str, scope: str, limit: int
-    ) -> dict[str, Any]:
-        delta, _ = _HISTORY_RANGES.get(range_key, _HISTORY_RANGES["24h"])
-        start = since_str(**delta)
-        end = utc_now_str()
-        rows = self._scope_devices(scope, limit)
-        span = max((parse_ts(end) - parse_ts(start)).total_seconds(), 1.0)
-        devices: list[dict[str, Any]] = []
-        for r in rows:
-            events = self._conn.execute(
-                "SELECT ts, event FROM presence_events WHERE mac = ? AND ts <= ? ORDER BY ts",
-                (r["mac"], end),
-            ).fetchall()
-            intervals = _intervals_from_events(events, start, end, bool(r["is_active"]))
-            online = sum((parse_ts(e) - parse_ts(s)).total_seconds() for s, e in intervals)
-            devices.append(
-                {
-                    "mac": r["mac"],
-                    "name": r["label"] or r["name"] or r["mac"],
-                    "is_active": bool(r["is_active"]),
-                    "watched": bool(r["watched"]),
-                    "uptime_pct": round(100 * online / span, 1),
-                    "intervals": [{"start": to_iso_z(s), "end": to_iso_z(e)} for s, e in intervals],
-                }
-            )
-        return {
-            "range": range_key,
-            "scope": scope,
-            "start": to_iso_z(start),
-            "end": to_iso_z(end),
-            "devices": devices,
-        }
-
-    def _get_presence_heatmap(self, days: int, scope: str, limit: int) -> dict[str, Any]:
-        end_dt = utc_now()
-        start_dt = (end_dt - timedelta(days=days - 1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        day_starts = [start_dt + timedelta(days=i) for i in range(days)]
-        start = start_dt.strftime(TS_FORMAT)
-        end = end_dt.strftime(TS_FORMAT)
-
-        devices = []
-        for r in self._scope_devices(scope, limit):
-            events = self._conn.execute(
-                "SELECT ts, event FROM presence_events WHERE mac = ? AND ts <= ? ORDER BY ts",
-                (r["mac"], end),
-            ).fetchall()
-            intervals = [
-                (parse_ts(s), parse_ts(e))
-                for s, e in _intervals_from_events(events, start, end, bool(r["is_active"]))
-            ]
-            cells = []
-            for d0 in day_starts:
-                d1 = min(d0 + timedelta(days=1), end_dt)
-                span = (d1 - d0).total_seconds()
-                online = sum(_overlap_seconds(s, e, d0, d1) for s, e in intervals)
-                cells.append(round(100 * online / span, 1) if span > 0 else 0.0)
-            devices.append(
-                {
-                    "mac": r["mac"],
-                    "name": r["label"] or r["name"] or r["mac"],
-                    "is_active": bool(r["is_active"]),
-                    "cells": cells,
-                }
-            )
-        return {
-            "days": [d.date().isoformat() for d in day_starts],
-            "scope": scope,
-            "devices": devices,
-        }
-
-    def _get_daily_activity(self, days: int) -> dict[str, Any]:
-        end_dt = utc_now()
-        start_dt = (end_dt - timedelta(days=days - 1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
-        rows = self._conn.execute(
-            "SELECT strftime('%Y-%m-%d', ts) AS day, event, COUNT(*) AS n"
-            " FROM presence_events WHERE ts >= ? GROUP BY day, event",
-            (start_dt.strftime(TS_FORMAT),),
-        ).fetchall()
-        agg: dict[str, dict[str, int]] = {}
-        for r in rows:
-            bucket = agg.setdefault(r["day"], {"new": 0, "online": 0, "offline": 0})
-            if r["event"] in bucket:
-                bucket[r["event"]] = r["n"]
-        day_list = [(start_dt + timedelta(days=i)).date().isoformat() for i in range(days)]
-        return {
-            "days": day_list,
-            "new": [agg.get(d, {}).get("new", 0) for d in day_list],
-            "online": [agg.get(d, {}).get("online", 0) for d in day_list],
-            "offline": [agg.get(d, {}).get("offline", 0) for d in day_list],
-        }
-
-    def _get_interface_history(self, range_key: str) -> dict[str, Any]:
-        delta, bucket = _HISTORY_RANGES.get(range_key, _HISTORY_RANGES["24h"])
-        since = since_str(**delta)
-        if bucket is None:
-            rows = self._conn.execute(
-                "SELECT ts AS b, ts AS ts, interface_type AS itype, active_count AS c"
-                " FROM interface_samples WHERE ts >= ? ORDER BY ts",
-                (since,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT strftime(?, ts) AS b, MIN(ts) AS ts, interface_type AS itype,"
-                " ROUND(AVG(active_count), 1) AS c FROM interface_samples"
-                " WHERE ts >= ? GROUP BY b, interface_type ORDER BY ts",
-                (bucket, since),
-            ).fetchall()
-        buckets: dict[str, dict[str, Any]] = {}
-        interfaces: set[str] = set()
-        for r in rows:
-            itype = r["itype"] or "Unknown"
-            interfaces.add(itype)
-            entry = buckets.setdefault(r["b"], {"ts": r["ts"], "data": {}})
-            entry["data"][itype] = r["c"]
-        ordered = sorted(buckets.values(), key=lambda e: e["ts"])
-        names = sorted(interfaces)
-        return {
-            "range": range_key,
-            "labels": [to_iso_z(e["ts"]) for e in ordered],
-            "series": [
-                {"interface": it, "data": [e["data"].get(it, 0) for e in ordered]}
-                for it in names
-            ],
-        }
-
     def _update_device(self, mac: str, fields: dict[str, Any]) -> dict[str, Any] | None:
-        allowed = {"label", "watched", "hidden"}
-        sets = {k: v for k, v in fields.items() if k in allowed}
-        if not sets:
-            return self._get_device(mac)
-        cols = ", ".join(f"{k} = ?" for k in sets)
-        self._conn.execute(
-            f"UPDATE devices SET {cols} WHERE mac = ?", (*sets.values(), mac)
-        )
-        self._conn.commit()
+        self._update_devices([mac], fields)
         return self._get_device(mac)
+
+    def _update_devices(self, macs: list[str], fields: dict[str, Any]) -> int:
+        sets = clean_fields(fields)
+        if not sets or not macs:
+            return 0
+        cols = ", ".join(f"{k} = ?" for k in sets)
+        marks = ",".join("?" * len(macs))
+        changed = self._conn.execute(
+            f"UPDATE devices SET {cols} WHERE mac IN ({marks})", (*sets.values(), *macs)
+        ).rowcount
+        self._conn.commit()
+        return changed
 
     def _prune(self, retention_days: int) -> int:
         cutoff = since_str(days=retention_days)
@@ -509,6 +420,9 @@ class Database:
                 f"DELETE FROM {table} WHERE ts < ?", (cutoff,)
             ).rowcount
         self._conn.commit()
+        if deleted:  # the derived history no longer matches what is stored
+            self._cover = self._rollup = None
+            self._cover_last, self._rollup_last = None, 0
         return deleted
 
     @staticmethod
@@ -518,6 +432,8 @@ class Database:
             "name": r["label"] or r["name"] or r["mac"],
             "router_name": r["name"],
             "label": r["label"],
+            "owner": r["owner"],
+            "carried": None if r["carried"] is None else bool(r["carried"]),
             "last_ip": r["last_ip"],
             "interface_type": r["interface_type"],
             "first_seen": to_iso_z(r["first_seen"]),

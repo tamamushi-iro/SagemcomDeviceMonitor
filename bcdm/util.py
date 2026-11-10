@@ -38,6 +38,20 @@ def to_iso_z(ts: str | None) -> str | None:
     return ts.replace(" ", "T") + "Z"
 
 
+def iso_to_epoch(iso: str | None) -> int | None:
+    """Epoch seconds for an ISO8601 timestamp such as the router's
+    ``2026-11-09T20:00:00-0500``; None if it is missing or unparseable."""
+    if not iso:
+        return None
+    try:
+        dt = parser.isoparse(iso)
+    except (ValueError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
 def x_time_ago(active_last_change_str: str | None) -> str | None:
     """Human-friendly 'X ago' for the router's active_last_change timestamp.
 
