@@ -28,6 +28,17 @@ uv run python -m bcdm --test-alert   # send a test ntfy notification
 uv run python -m bcdm --reset-login  # re-enable router logins (see "Router login protection")
 ```
 
+Deleting what is stored (each only shows what it would delete until you add `--yes`):
+
+```bash
+uv run python -m bcdm --forget-owner Alex          # every device of this owner, with its history
+uv run python -m bcdm --forget-device Alexs-iPad   # one device, by name or MAC address
+uv run python -m bcdm --drop-interface-samples     # the unused table of pre-November-2026 databases
+```
+
+These are safe while the monitor is running. A forgotten device that connects again is
+tracked as a new device; see [docs/dashboard.md](docs/dashboard.md#forgetting-devices).
+
 ## Run with Docker
 
 ```bash
@@ -39,6 +50,7 @@ docker compose up -d --build
 docker compose run --rm bcdm python -m bcdm --once          # connectivity check
 docker compose run --rm bcdm python -m bcdm --test-alert    # send a test alert
 docker compose run --rm bcdm python -m bcdm --reset-login   # re-enable router logins
+docker compose exec bcdm python -m bcdm --forget-owner Alex # same commands as above work here
 ```
 
 ## Dashboard

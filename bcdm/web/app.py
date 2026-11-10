@@ -141,6 +141,10 @@ class DevicesUpdate(DeviceUpdate):
     macs: list[str] = Field(min_length=1, max_length=500)
 
 
+class Forget(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)  # "owner:<name>" or "dev:<key>"
+
+
 # -- pages -------------------------------------------------------------------
 
 
@@ -253,6 +257,18 @@ async def api_update_devices(request: Request, body: DevicesUpdate) -> dict:
     fields = body.model_dump(exclude_unset=True, exclude={"macs"})
     changed = await db_of(request).update_devices([m.upper() for m in body.macs], **fields)
     return {"changed": changed}
+
+
+@router.post("/api/forget")
+async def api_forget(request: Request, body: Forget) -> dict:
+    """Delete a person's devices or one device, with all of their presence history.
+
+    It cannot be undone. A device that connects again afterwards is a new device.
+    """
+    try:
+        return await db_of(request).forget_subject(body.subject, now_of(request))
+    except insights.UnknownSubject as exc:
+        raise HTTPException(status_code=404, detail="Unknown subject") from exc
 
 
 @router.post("/api/devices/{mac}")

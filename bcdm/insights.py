@@ -343,6 +343,26 @@ def _subject_tracks(
     raise UnknownSubject(key)
 
 
+def subject_addresses(m: Model, subject: str) -> tuple[str, list[str]]:
+    """Every MAC address behind a person ("owner:<name>": all they own) or a device
+    ("dev:<key>": all its addresses), with the name to show for it."""
+    _, name, _, _, _, members, _ = _subject_tracks(m, subject)
+    return name, [d["mac"] for e in members for d in e.rows]
+
+
+def find_devices(m: Model, text: str) -> list[Entity]:
+    """Devices matching a MAC address, or else a name: as shown, as the device
+    announces itself, or as labelled. A shared name ("iPhone") matches several."""
+    want = text.strip().lower()
+    by_address = [e for e in m.entities.values() if any(d["mac"].lower() == want for d in e.rows)]
+    if by_address:
+        return by_address
+    return [
+        e for e in m.entities.values()
+        if want in (e.name.lower(), (e.hostname or "").lower(), (e.label or "").lower())
+    ]
+
+
 def _entity_brief(e: Entity) -> dict[str, Any]:
     return {
         "key": f"dev:{e.key}",
@@ -440,7 +460,11 @@ def overview(m: Model, live: dict[str, Any] | None = None) -> dict[str, Any]:
     connected.sort(key=lambda r: (-r["since"], r["name"].lower()))
 
     seen = [e for e in m.entities.values() if e.raw]
-    new = [e for e in seen if t1 - e.first_on < 7 * 86400 and e.first_on > m.data_start + 86400]
+    # Hiding a device says "I know what this is": it stops counting as a newcomer.
+    new = [
+        e for e in seen
+        if not e.hidden and t1 - e.first_on < 7 * 86400 and e.first_on > m.data_start + 86400
+    ]
     always = [e for e in seen if e.kind == "always_on"]
     persons = [p for p in m.people.values() if p.is_person]
     suggestions = Counter(e.suggestion for e in m.entities.values() if e.suggestion)
@@ -548,7 +572,10 @@ def patterns(m: Model, subject: str, weeks: int) -> dict[str, Any]:
             "devices": [
                 _entity_brief(e)
                 for e in sorted(
-                    (e for e in m.entities.values() if e.raw),
+                    # Hidden devices are not offered, but one that is being looked at
+                    # (opened from the Health page, say) stays selectable.
+                    (e for e in m.entities.values()
+                     if e.raw and (not e.hidden or subject == f"dev:{e.key}")),
                     key=lambda e: (KIND_ORDER[e.kind], e.name.lower()),
                 )
             ],

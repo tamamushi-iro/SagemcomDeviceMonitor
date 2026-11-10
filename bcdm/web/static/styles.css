@@ -134,6 +134,9 @@ select:focus-visible, input:focus-visible, button:focus-visible, a:focus-visible
 .btn.quiet { border-color: transparent; color: var(--ink-2); padding: 3px 8px; }
 .btn.quiet:hover { color: var(--ink); }
 .btn.on { background: var(--accent-wash); border-color: var(--accent); }
+/* Deleting things: marked by a red edge, text stays in ink. */
+.btn.danger { border-color: color-mix(in srgb, var(--critical) 70%, transparent); }
+.btn.danger:hover { background: color-mix(in srgb, var(--critical) 12%, var(--surface)); }
 
 /* ---- notices ---- */
 .notice {
@@ -273,6 +276,8 @@ input.edit::placeholder { color: var(--muted); opacity: 1; }
 .cell-name input.edit { font-weight: 600; }
 .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font-size: inherit; }
 .linkish:hover { text-decoration: underline; }
+.linkish.danger { color: var(--ink-2); }
+.linkish.danger:hover { color: var(--critical); }
 
 /* accessible twin of a chart */
 .table-view { max-height: 360px; overflow: auto; border-top: 1px solid var(--border); }

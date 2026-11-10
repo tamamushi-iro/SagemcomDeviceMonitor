@@ -16,6 +16,7 @@ const query = new URLSearchParams(location.search);
 
 let show = SHOWS.includes(query.get("show")) ? query.get("show") : "seen";
 let days = 90;
+let owner = "";      // show only this owner's devices ("" = anyone)
 let list = null;     // /api/devices
 let history_ = null; // /api/device-days
 const open = new Set();   // device keys whose MAC addresses are expanded
@@ -28,10 +29,11 @@ const matrix = chart(byId("dv-matrix-chart"), deviceMatrix, {
   },
 });
 
+// A hidden device only shows under "Hidden" and "Everything".
 const PICK = {
   seen: (d) => d.kind !== "never" && !d.hidden,
-  online: (d) => d.active,
-  new: (d) => d.kind === "new",
+  online: (d) => d.active && !d.hidden,
+  new: (d) => d.kind === "new" && !d.hidden,
   unowned: (d) => d.kind !== "never" && !d.owner && !d.hidden,
   hidden: (d) => d.hidden,
   all: () => true,
@@ -39,7 +41,7 @@ const PICK = {
 
 function visible() {
   const q = byId("dv-filter").value.trim().toLowerCase();
-  return list.devices.filter(PICK[show]).filter((d) => !q
+  return list.devices.filter(PICK[show]).filter((d) => !owner || d.owner === owner).filter((d) => !q
     || [d.name, d.hostname, d.label, d.owner, ...d.macs.flatMap((m) => [m.mac, m.ip])]
       .some((v) => (v || "").toLowerCase().includes(q)));
 }
@@ -91,6 +93,42 @@ async function save(d, field, value, input) {
   }
 }
 
+/** Delete a device, or everything an owner has, for good, after spelling out what goes. */
+async function forget(subject, question) {
+  const sure = confirm(`${question}\n\nThis cannot be undone. Anything that connects again afterwards is tracked as a new device.`);
+  if (!sure) return;
+  try {
+    await postJSON("/api/forget", { subject });
+    await Promise.all([loadList(), loadHistory()]);
+  } catch (e) {
+    alert(`Could not forget it: ${e.message}`);
+  }
+}
+
+const forgetDevice = (d) => forget(d.key,
+  `Forget ${d.name}?\n\nThis deletes ${plural(d.macs.length, "MAC address", "MAC addresses")} and all of its recorded history.`);
+
+function forgetOwner() {
+  const theirs = list.devices.filter((d) => d.owner === owner);
+  const addresses = theirs.reduce((n, d) => n + d.macs.length, 0);
+  forget(`owner:${owner}`,
+    `Forget ${owner}?\n\nThis deletes ${plural(theirs.length, "device")} (${plural(addresses, "MAC address", "MAC addresses")}) and all of their recorded history.`);
+}
+
+function syncForgetOwner() {
+  const btn = byId("dv-forget-owner");
+  btn.hidden = !owner;
+  btn.textContent = owner ? `Forget ${owner}` : "";
+}
+
+function renderOwners() {
+  if (owner && !list.owners.includes(owner)) owner = "";  // just forgotten, or renamed
+  byId("dv-owner").replaceChildren(el("option", { value: "" }, "Anyone"),
+    ...list.owners.map((o) => el("option", { value: o, selected: o === owner }, o)));
+  byId("dv-owner-wrap").hidden = list.owners.length === 0;
+  syncForgetOwner();
+}
+
 function statusDot(d) {
   return d.active ? el("i", { class: "dot ok", title: "Online" }) : el("i", { class: "dot hollow", title: "Offline" });
 }
@@ -138,7 +176,9 @@ function row(d) {
     el("td", { class: "ctr" }, el("input", { type: "checkbox", checked: d.watched, "aria-label": `Watch ${d.name}`,
       onchange: (ev) => save(d, "watched", ev.target.checked) })),
     el("td", { class: "ctr" }, el("input", { type: "checkbox", checked: d.hidden, "aria-label": `Hide ${d.name}`,
-      onchange: (ev) => save(d, "hidden", ev.target.checked) })));
+      onchange: (ev) => save(d, "hidden", ev.target.checked) })),
+    el("td", null, el("button", { class: "linkish danger", type: "button", "aria-label": `Forget ${d.name}`,
+      title: "Delete this device and all of its recorded history", onclick: () => forgetDevice(d) }, "Forget")));
   if (!open.has(d.key)) return [tr];
   return [tr, ...d.macs.map((m) => macRow(m))];
 }
@@ -159,7 +199,7 @@ function macRow(m) {
   };
   return el("tr", { class: "sub" },
     el("td", { class: "ctr" }, m.active ? el("i", { class: "dot ok" }) : null),
-    el("td", { colspan: 8 },
+    el("td", { colspan: 9 },
       el("span", { class: "mono" }, m.mac), "  ",
       [m.ip && `${m.ip}`, m.interface, m.randomized && "private address",
         `first seen ${fmtDate(m.first_seen)}`, `last listed ${fmtWhen(m.last_seen, list.now)}`].filter(Boolean).join(" · "),
@@ -173,8 +213,11 @@ function renderTable() {
   byId("dv-empty").hidden = rows.length > 0;
   byId("dv-owners").replaceChildren(...list.owners.map((o) => el("option", { value: o })));
   const s = list.summary;
+  // The total counts hidden devices; say so, since the "Online now" view leaves them out.
+  const hiddenOnline = list.devices.filter((d) => d.active && d.hidden).length;
   byId("dv-summary").textContent = `${plural(s.devices, "device")} seen online since ${fmtDate(s.since)}, `
-    + `from ${plural(s.addresses, "MAC address", "MAC addresses")}; ${s.online} online now.`;
+    + `from ${plural(s.addresses, "MAC address", "MAC addresses")}; ${s.online} online now`
+    + `${hiddenOnline ? `, ${hiddenOnline} of them hidden` : ""}.`;
 }
 
 function renderSuggestions() {
@@ -200,6 +243,7 @@ async function loadList(keepFocus = false) {
   const focus = keepFocus && document.activeElement?.getAttribute("aria-label");
   list = await api("/api/devices");
   renderSuggestions();
+  renderOwners();
   renderTable();
   drawMatrix();
   if (focus) tbody.querySelector(`[aria-label="${CSS.escape(focus)}"]`)?.focus();
@@ -215,6 +259,8 @@ const refresh = () => { renderTable(); drawMatrix(); };
 segmented(byId("dv-show"), show, (v) => { show = v; refresh(); });
 segmented(byId("dv-days"), days, (v) => { days = +v; loadHistory().catch(() => {}); });
 byId("dv-filter").addEventListener("input", refresh);
+byId("dv-owner").addEventListener("change", (ev) => { owner = ev.target.value; syncForgetOwner(); refresh(); });
+byId("dv-forget-owner").addEventListener("click", forgetOwner);
 
 tableView(byId("dv-matrix"), () => history_ && {
   columns: [{ label: "Device" }, { label: "Owner" }, { label: "First online" }, { label: "Days present", num: true }, { label: "Hours a day when present", num: true }],

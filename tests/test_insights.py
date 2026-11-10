@@ -252,6 +252,49 @@ class PatternsTests(unittest.TestCase):
                 insights.patterns(self.m, key, 4)
 
 
+class HiddenDeviceTests(unittest.TestCase):
+    """Hiding leaves a device out of device lists; totals and Health still include it."""
+
+    @staticmethod
+    def hide(st: State, mac: str) -> None:
+        next(d for d in st.devices if d["mac"] == mac)["hidden"] = 1
+
+    def test_hidden_devices_are_not_offered_on_patterns(self):
+        st = household()
+        self.hide(st, THERMOSTAT)
+        m = build_model(st, TZ)
+        offered = [o["name"] for o in insights.patterns(m, "devices", 4)["options"]["devices"]]
+        self.assertNotIn("My-ecobee", offered)
+        self.assertIn(ACCESS_POINT, offered)
+
+    def test_a_hidden_device_that_is_open_stays_selectable(self):
+        st = household()
+        self.hide(st, THERMOSTAT)
+        p = insights.patterns(build_model(st, TZ), f"dev:mac:{THERMOSTAT}", 4)
+        self.assertEqual(p["subject"]["name"], "My-ecobee")
+        self.assertIn("My-ecobee", [o["name"] for o in p["options"]["devices"]])
+
+    def test_a_hidden_newcomer_is_not_counted_as_new(self):
+        newcomer = "C0:00:00:00:00:77"
+        st = household()
+        st.devices.append(dict(st.devices[0], mac=newcomer, name="Guest-Tablet", owner=None,
+                               first_seen=at(10, 24, 15)))
+        st.events[newcomer] = [(at(10, 24, 15), True), (at(10, 24, 17), False)]
+        self.assertEqual(insights.overview(build_model(st, TZ))["counts"]["new_7d"], 1)
+        self.hide(st, newcomer)
+        self.assertEqual(insights.overview(build_model(st, TZ))["counts"]["new_7d"], 0)
+
+    def test_totals_and_health_still_include_hidden_devices(self):
+        st = household()
+        self.hide(st, THERMOSTAT)
+        m = build_model(st, TZ)
+        o = insights.overview(m)
+        self.assertEqual(o["counts"]["connected"], 3)
+        self.assertEqual(o["counts"]["always_on"], 2)
+        self.assertTrue(next(c for c in o["connected"] if c["mac"] == THERMOSTAT)["hidden"])
+        self.assertIn("My-ecobee", [a["name"] for a in insights.health(m, 30)["always_on"]])
+
+
 class DevicesAndHealthTests(unittest.TestCase):
     def setUp(self):
         self.m = build_model(household(), TZ)

@@ -13,15 +13,22 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from .analytics import BUCKET_S, SAMPLE_GAP_S
-from .insights import Model, State, build_model
-from .util import TS_FORMAT, iso_to_epoch, since_str, to_iso_z, utc_now_str, x_time_ago
+from .insights import Model, State, build_model, find_devices, subject_addresses
+from .util import (
+    TS_FORMAT,
+    iso_to_epoch,
+    parse_ts,
+    since_str,
+    to_iso_z,
+    utc_now_str,
+    x_time_ago,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -53,13 +60,6 @@ CREATE TABLE IF NOT EXISTS presence_events (
     FOREIGN KEY (mac) REFERENCES devices(mac)
 );
 CREATE INDEX IF NOT EXISTS idx_presence_events_mac_ts ON presence_events(mac, ts);
-
-CREATE TABLE IF NOT EXISTS interface_samples (
-    ts             TEXT NOT NULL,
-    interface_type TEXT NOT NULL,
-    active_count   INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_interface_samples_ts ON interface_samples(ts);
 """
 
 # Columns added after the first release: (table, column, declaration).
@@ -67,8 +67,19 @@ CREATE INDEX IF NOT EXISTS idx_interface_samples_ts ON interface_samples(ts);
 # carried: whether it goes where its owner goes (1/0), or NULL to judge by its hostname.
 _ADDED_COLUMNS = (("devices", "owner", "TEXT"), ("devices", "carried", "INTEGER"))
 
+# Databases from before November 2026 also hold this table: one row per poll and
+# connection type (Ethernet / WiFi), which fed a chart that no longer exists. Nothing
+# reads or writes it now, and the same numbers follow from each device's connection
+# type and its presence history. `python -m bcdm --drop-interface-samples` removes it.
+LEGACY_TABLE = "interface_samples"
+
+#: A device whose record did not change still gets its last_seen brought up to date
+#: this often, so last_seen keeps meaning "the router listed it about then".
+LAST_SEEN_REFRESH_S = 3600
+
 _EPOCH = "CAST(strftime('%s', {}) AS INTEGER)"
 _EDITABLE = ("label", "owner", "watched", "hidden", "carried")
+_UTC = ZoneInfo("UTC")
 OWNER_MAX_LEN = 40
 
 
@@ -105,6 +116,7 @@ class Database:
         self._events: dict[str, list[tuple[int, bool]]] | None = None
         self._events_ver = 0
         self._memo: dict[Any, Any] = {}
+        self._data_version: int | None = None
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
@@ -146,6 +158,23 @@ class Database:
     async def prune(self, retention_days: int) -> int:
         return await self._run(self._prune, retention_days)
 
+    async def find_subjects(self, kind: str, text: str, now: int) -> list[dict[str, Any]]:
+        """What "forget this owner / this device" would remove, without removing it.
+
+        ``kind`` is "owner" or "device"; a device is named by a MAC address or by its
+        name. Each match is ``{subject, name, addresses: [{mac, name, events}]}``.
+        """
+        return await self._run(self._find_subjects, kind, text, now)
+
+    async def forget_subject(self, subject: str, now: int) -> dict[str, Any]:
+        """Delete a person's devices ("owner:<name>") or one device ("dev:<key>"), with
+        every MAC address behind them and all of their presence history."""
+        return await self._run(self._forget_subject, subject, now)
+
+    async def drop_legacy_table(self, *, dry_run: bool = False) -> dict[str, Any]:
+        """Remove the unused connection-type log left in older databases."""
+        return await self._run(self._drop_legacy_table, dry_run)
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -163,6 +192,11 @@ class Database:
         self, hosts: list[dict[str, Any]], window_min: int
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         ts = utc_now_str()
+        # A device's row is written only when something about it changed, or to bring
+        # last_seen up to date about once an hour. Rewriting every listed device on
+        # every poll was most of what the monitor wrote to disk, which matters on an
+        # SD card.
+        refresh_before = (parse_ts(ts) - timedelta(seconds=LAST_SEEN_REFRESH_S)).strftime(TS_FORMAT)
         cur = self._conn.cursor()
         existing = {r["mac"]: r for r in cur.execute("SELECT * FROM devices")}
         is_initial = not existing  # first ever poll: seed baseline, don't alert
@@ -194,11 +228,15 @@ class Database:
                     evt(mac, "new", None, h)
             else:
                 was_active = bool(row["is_active"])
-                cur.execute(
-                    "UPDATE devices SET name=?, last_ip=?, interface_type=?, last_seen=?,"
-                    " is_active=? WHERE mac=?",
-                    (h["name"], h["ip"], h["interface_type"], ts, int(active), mac),
+                changed = (row["name"], row["last_ip"], row["interface_type"], was_active) != (
+                    h["name"], h["ip"], h["interface_type"], active
                 )
+                if changed or row["last_seen"] <= refresh_before:
+                    cur.execute(
+                        "UPDATE devices SET name=?, last_ip=?, interface_type=?, last_seen=?,"
+                        " is_active=? WHERE mac=?",
+                        (h["name"], h["ip"], h["interface_type"], ts, int(active), mac),
+                    )
                 if not is_initial and active and not was_active:
                     evt(mac, "online", row, h)
                 elif not is_initial and not active and was_active:
@@ -220,13 +258,6 @@ class Database:
             "INSERT INTO count_samples (ts, active_count, total_count) VALUES (?,?,?)",
             (ts, active_count, total_count),
         )
-        for itype, n in Counter(
-            h["interface_type"] or "Unknown" for h in hosts if h["active"]
-        ).items():
-            cur.execute(
-                "INSERT INTO interface_samples (ts, interface_type, active_count) VALUES (?,?,?)",
-                (ts, itype, n),
-            )
         self._conn.commit()
 
         now_devices = self._build_now(cur, hosts, window_min)
@@ -288,7 +319,20 @@ class Database:
         model: Model = build_model(self._state(now), tz)
         return build(model, *args)
 
+    def _forget_derived(self) -> None:
+        """Drop everything worked out from the stored history; it is rebuilt on demand."""
+        self._cover = self._rollup = self._events = None
+        self._cover_last, self._rollup_last, self._events_ver = None, 0, 0
+        self._memo.clear()
+
     def _state(self, now: int) -> State:
+        # data_version moves only when *another* connection commits: a forget run from
+        # the command line, a restored backup. What was derived may then be out of date.
+        version = self._conn.execute("PRAGMA data_version").fetchone()[0]
+        if version != self._data_version:
+            if self._data_version is not None:
+                self._forget_derived()
+            self._data_version = version
         return State(
             now=now,
             sample_gap=self._sample_gap,
@@ -304,7 +348,9 @@ class Database:
         """Spans in which polls kept succeeding (no gap longer than the sample gap).
 
         Built once from every sample, then extended with the samples that arrived
-        since the previous call.
+        since the previous call. A poll at second ``t`` covers ``[t, t + 1)``: the
+        state at the latest poll is known, so a device that came online in that very
+        poll counts as connected straight away, not one poll later.
         """
         gap = self._sample_gap
         if self._cover is None:
@@ -337,7 +383,7 @@ class Database:
                 else:
                     spans[-1][1] = t
                 self._cover_last = ts
-        return [(s, e) for s, e in spans if e > s]
+        return [(s, e + 1) for s, e in spans]
 
     def _counts(self) -> dict[int, tuple[int, int, int, int]]:
         """Connected-device count per 15 minutes: (samples, sum, min, max)."""
@@ -414,8 +460,9 @@ class Database:
 
     def _prune(self, retention_days: int) -> int:
         cutoff = since_str(days=retention_days)
+        tables = ["count_samples"] + ([LEGACY_TABLE] if self._has_table(LEGACY_TABLE) else [])
         deleted = 0
-        for table in ("count_samples", "interface_samples"):
+        for table in tables:
             deleted += self._conn.execute(
                 f"DELETE FROM {table} WHERE ts < ?", (cutoff,)
             ).rowcount
@@ -424,6 +471,76 @@ class Database:
             self._cover = self._rollup = None
             self._cover_last, self._rollup_last = None, 0
         return deleted
+
+    def _has_table(self, name: str) -> bool:
+        return self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+        ).fetchone() is not None
+
+    def _drop_legacy_table(self, dry_run: bool) -> dict[str, Any]:
+        if not self._has_table(LEGACY_TABLE):
+            return {"present": False, "rows": 0, "bytes": 0}
+        rows = self._conn.execute(f"SELECT COUNT(*) FROM {LEGACY_TABLE}").fetchone()[0]
+        if dry_run:
+            return {"present": True, "rows": rows, "bytes": 0}
+        page = self._conn.execute("PRAGMA page_size").fetchone()[0]
+        free = self._conn.execute("PRAGMA freelist_count").fetchone()[0]
+        self._conn.execute(f"DROP TABLE {LEGACY_TABLE}")  # takes its index with it
+        self._conn.commit()
+        freed = self._conn.execute("PRAGMA freelist_count").fetchone()[0] - free
+        return {"present": True, "rows": rows, "bytes": freed * page}
+
+    # -- forgetting ----------------------------------------------------------
+
+    def _describe(self, macs: list[str]) -> list[dict[str, Any]]:
+        out = []
+        for mac in macs:
+            row = self._conn.execute(
+                "SELECT d.mac, COALESCE(d.label, d.name) AS name,"
+                " (SELECT COUNT(*) FROM presence_events e WHERE e.mac = d.mac) AS events"
+                " FROM devices d WHERE d.mac = ?",
+                (mac,),
+            ).fetchone()
+            if row:
+                out.append(dict(row))
+        return out
+
+    def _find_subjects(self, kind: str, text: str, now: int) -> list[dict[str, Any]]:
+        model = build_model(self._state(now), _UTC)
+        if kind == "owner":
+            wanted = text.strip().lower()
+            keys = [f"owner:{name}" for name in model.people if name.lower() == wanted]
+        else:
+            keys = [f"dev:{e.key}" for e in find_devices(model, text)]
+        out = []
+        for key in keys:
+            name, macs = subject_addresses(model, key)
+            out.append({"subject": key, "name": name, "addresses": self._describe(macs)})
+        return out
+
+    def _forget_subject(self, subject: str, now: int) -> dict[str, Any]:
+        name, macs = subject_addresses(build_model(self._state(now), _UTC), subject)
+        return {"name": name, **self._forget(macs)}
+
+    def _forget(self, macs: list[str]) -> dict[str, int]:
+        """Delete devices and their history: events first, since they refer to the device."""
+        macs = sorted({m.upper() for m in macs})
+        events = addresses = 0
+        for i in range(0, len(macs), 500):
+            chunk = macs[i: i + 500]
+            marks = ",".join("?" * len(chunk))
+            events += self._conn.execute(
+                f"DELETE FROM presence_events WHERE mac IN ({marks})", chunk
+            ).rowcount
+            addresses += self._conn.execute(
+                f"DELETE FROM devices WHERE mac IN ({marks})", chunk
+            ).rowcount
+        self._conn.commit()
+        # The history kept in memory still has them; were an address to come back,
+        # it must start from nothing.
+        self._events, self._events_ver = None, 0
+        self._memo.clear()
+        return {"addresses": addresses, "events": events}
 
     @staticmethod
     def _device_dict(r: sqlite3.Row) -> dict[str, Any]:
