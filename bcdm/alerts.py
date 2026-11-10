@@ -79,6 +79,15 @@ class Alerter:
                 tags=["red_circle"],
             )
 
+    async def login_disabled(self, reason: str) -> None:
+        """Tell the user the monitor stopped logging in to the router (sent once)."""
+        await self._post(
+            title="Router login disabled",
+            message=reason,
+            priority="high",
+            tags=["warning"],
+        )
+
     async def test(self) -> bool:
         """Send a one-off test notification (used by `python -m bcdm --test-alert`)."""
         return await self._post(

@@ -3,7 +3,8 @@
 Resilient by design -- any failure (router reboot, session expiry, network blip)
 is caught, surfaced on the snapshot, and retried with exponential backoff so the
 service never crashes. Holds the latest enriched "now" snapshot in memory for the
-dashboard's live view.
+dashboard's live view. The one thing it does not retry is a password the router
+keeps rejecting: the LoginGuard disables logins and the poller just reports that.
 """
 
 from __future__ import annotations
@@ -14,24 +15,26 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sagemcom_api.exceptions import (
-    AuthenticationException,
     LoginRetryErrorException,
     MaximumSessionCountException,
+    UnauthorizedException,
 )
 
 from .alerts import Alerter
 from .config import Settings
 from .db import Database
+from .login_guard import LoginDisabledError
 from .router_client import RouterClient
 from .util import to_iso_z, utc_now, utc_now_str
 
 log = logging.getLogger(__name__)
 
 _MAX_BACKOFF = 60.0
-# Wrong credentials / router lockout: retry slowly. Hammering a bad login only
-# extends the Sagemcom lockout (XMO_LOGIN_RETRY_ERR), so we wait this long.
+# Rejected login / too many router sessions: wait this long before the next try.
+# For a rejected password that next try is the only retry: the LoginGuard disables
+# logins on the second rejection (or at once on a lockout).
 _AUTH_BACKOFF = 120.0
-_AUTH_ERRORS = (AuthenticationException, LoginRetryErrorException, MaximumSessionCountException)
+_AUTH_ERRORS = (UnauthorizedException, LoginRetryErrorException, MaximumSessionCountException)
 
 
 @dataclass
@@ -42,6 +45,7 @@ class Snapshot:
     devices: list[dict[str, Any]] = field(default_factory=list)
     online: bool = False
     error: str | None = None
+    login_disabled: bool = False
 
 
 class Poller:
@@ -60,6 +64,7 @@ class Poller:
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
         self._last_prune_day: str | None = None
+        self._login_disabled_alerted = False
 
     def start(self) -> None:
         self._task = asyncio.create_task(self.run(), name="bcdm-poller")
@@ -84,6 +89,7 @@ class Poller:
                     devices=now_devices,
                     online=True,
                 )
+                self._login_disabled_alerted = False
                 for event in events:
                     await self._alerter.handle_event(event, self._s.alert_new_device)
                 await self._maybe_prune()
@@ -91,21 +97,41 @@ class Poller:
                 await self._wait(interval)
             except asyncio.CancelledError:
                 raise
+            except LoginDisabledError as exc:
+                # Gave up on the router login. Stay up (exiting would only make
+                # systemd/Docker restart us), keep serving history, and re-check each
+                # interval: the guard answers from its file without contacting the
+                # router, so `--reset-login` resumes polling without a restart.
+                self._offline(str(exc), login_disabled=True)
+                if not self._login_disabled_alerted:
+                    self._login_disabled_alerted = True
+                    log.error("%s", exc)
+                    await self._alerter.login_disabled(str(exc))
+                backoff = 1.0
+                await self._wait(interval)
             except _AUTH_ERRORS as exc:
-                log.warning(
-                    "Login rejected (%s); backing off %.0fs. Check router_password/encryption.",
-                    exc, _AUTH_BACKOFF,
-                )
-                self.snapshot.online = False
-                self.snapshot.error = f"login rejected: {exc}"
+                if isinstance(exc, MaximumSessionCountException):
+                    what = "router has too many open sessions"  # not counted by the guard
+                else:
+                    what = "router rejected the login (one more rejection disables logins)"
+                log.warning("%s: %s; retrying in %.0fs", what, exc, _AUTH_BACKOFF)
+                self._offline(f"{what}: {exc}; retrying in {_AUTH_BACKOFF:.0f}s")
                 await self._wait(_AUTH_BACKOFF)
                 backoff = 1.0
             except Exception as exc:  # pylint: disable=broad-except
                 log.warning("Poll failed: %s", exc)
-                self.snapshot.online = False
-                self.snapshot.error = str(exc)
+                self._offline(str(exc))
                 await self._wait(backoff)
                 backoff = min(backoff * 2, _MAX_BACKOFF)
+
+    def _offline(self, error: str, *, login_disabled: bool = False) -> None:
+        """Mark the live snapshot offline. Any outcome other than "logins disabled"
+        ends a disabled episode, so if logins get disabled again it alerts again."""
+        self.snapshot.online = False
+        self.snapshot.error = error
+        self.snapshot.login_disabled = login_disabled
+        if not login_disabled:
+            self._login_disabled_alerted = False
 
     async def _wait(self, seconds: float) -> None:
         """Sleep, but wake immediately if stop() is called."""

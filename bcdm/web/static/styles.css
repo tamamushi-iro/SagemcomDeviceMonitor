@@ -92,6 +92,17 @@ main { flex: 1; min-width: 0; padding: 24px 28px 64px; max-width: 1100px; }
 .dot.ok { background: var(--accent); box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 70%, transparent); }
 .dot.bad { background: var(--bad); box-shadow: 0 0 8px color-mix(in srgb, var(--bad) 60%, transparent); }
 
+/* Page-wide notice (e.g. router login disabled). No display rule, so [hidden] works. */
+.notice {
+  margin: 0 0 18px; padding: 12px 14px; border-radius: 10px;
+  font-size: 14px; line-height: 1.5; white-space: pre-line;
+  background: var(--panel); border: 1px solid var(--line);
+}
+.notice.bad {
+  background: color-mix(in srgb, var(--bad) 10%, var(--panel));
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+}
+
 .hero { display: flex; align-items: baseline; gap: 16px; margin: 8px 0 20px; }
 .hero-num { font-size: 64px; font-weight: 800; line-height: 1; color: var(--accent); }
 .hero-label { font-size: 18px; }

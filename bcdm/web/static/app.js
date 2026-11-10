@@ -55,6 +55,7 @@ let snapshotHook = null; // set by the Now page
 async function refreshStatus() {
   const dot = document.getElementById("status-dot");
   const txt = document.getElementById("status-text");
+  const notice = document.getElementById("status-notice");
   try {
     const s = await fetchJSON("/api/now");
     if (s.online) {
@@ -62,7 +63,13 @@ async function refreshStatus() {
       txt.textContent = "Online · " + fmtTime(s.updated_at);
     } else {
       dot.className = "dot bad";
-      txt.textContent = "Router unreachable";
+      txt.textContent = s.login_disabled ? "Router login disabled" : "Router unreachable";
+    }
+    txt.title = s.online ? "" : (s.error || "");
+    // Logins stopped after rejected passwords / a lockout: say why and how to fix it.
+    if (notice) {
+      notice.hidden = !s.login_disabled;
+      notice.textContent = s.login_disabled ? (s.error || "") : "";
     }
     if (snapshotHook) snapshotHook(s);
   } catch (e) {

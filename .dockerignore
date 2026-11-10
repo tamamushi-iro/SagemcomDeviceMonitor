@@ -10,6 +10,7 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+*.login-guard.json*
 .env
 config.toml
 
@@ -18,6 +19,7 @@ config.toml
 .gitignore
 backup/
 deploy/
+tests/
 *.md
 .python-version
 Dockerfile
